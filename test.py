@@ -1,64 +1,54 @@
-import sys, re, os, subprocess, socket
+import os
+import re
+import socket
+import subprocess
 from mac_vendor_lookup import MacLookup
+
+# Initialize MacLookup once to avoid reloading it constantly
+try:
+    mac_lookup = MacLookup()
+    # mac_lookup.update_vendors() # Uncomment this if you need to update the OUI database
+except:
+    mac_lookup = None
 
 def get_vendor(mac):
     try:
-        return MacLookup().lookup(mac)
-    except Exception:
-        return "unknown"
+        if not mac or mac == "Unknown":
+            return "Unknown"
+        # Randomized/private MAC detection (checking the locally administered bit)
+        if len(mac) > 1 and mac[1].upper() in ['2', '6', 'A', 'E']:
+            return "Private/Randomized MAC"
+        return mac_lookup.lookup(mac) if mac_lookup else "Unknown"
+    except:
+        return "Unknown"
 
-hosts_locs = [
-  "/etc/hosts",
-  "C:\\Windows\\System32\\drivers\\etc\\hosts"
-  ]
+HOSTS_PATHS = ["/etc/hosts", "C:\\Windows\\System32\\drivers\\etc\\hosts"]
 
-hosts = {}
- 
 def query_hosts(address):
-  #Looks for a hostname to match the given address in the hosts file.
-  filename = ""
-  for hosts_name in hosts_locs:
-    if os.path.isfile(hosts_name):
-      filename = hosts_name
-      lines = open(hosts_name).readlines()
-      slines = [line.split() for line in lines]
-      for sline in slines:
-        if (len(sline) > 1) and (sline[0][0] != "#") :
-          hosts[sline[0]] = sline[1].split(".")[0]
-      break
-  if not hosts:
-    print("[lookup]: We could not find any hosts file. We looked in:")
-    for hosts_name in hosts_locs:
-      print("[lookup]:\t - %s"%hosts_name)
-    return None, None
-  elif address in hosts:
-      return hosts[address],filename
-  else:
-      return None,filename
-
-
-
-def query_nslookup(address):
-  #contacts DNS Server to find hostname from IP address
-
-  result = subprocess.run("nslookup %s"%address, shell=True, capture_output=True, text=True)
-  results = result.stdout
-  exp = re.compile(r"Name:\s*(.*)", re.M | re.I)
-  for line in results.split("\n"):
-    mo = exp.search(line)
-    if mo:
-      return mo.group(1).split(".")[0]
-  return None
-
-
-
-def query_socket(address):
-  #Uses socket.gethostbyaddr() to get hostname from IP address.
-  try:
-    hostname = socket.gethostbyaddr(address)[0]
-    return hostname.split(".")[0]
-  except (socket.herror, socket.gaierror, OSError):
+    for path in HOSTS_PATHS:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"): continue
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[0] == address:
+                            return parts[1].split(".")[0]
+            except: pass
     return None
 
+def query_nslookup(address):
+    try:
+        result = subprocess.run(f"nslookup {address}", shell=True, capture_output=True, text=True, timeout=1)
+        match = re.search(r"Name:\s*(.*)", result.stdout, re.I)
+        if match:
+            return match.group(1).strip().split(".")[0]
+    except: pass
+    return None
 
-
+def query_socket(address):
+    try:
+        hostname = socket.gethostbyaddr(address)[0]
+        return hostname.split(".")[0]
+    except: return None
