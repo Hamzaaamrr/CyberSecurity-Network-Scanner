@@ -35,24 +35,46 @@ def clean_hostname(name, ip):
 
 # ── Discovery Engine ─────────────────────────────────────────────────────────
 
-def arp_scan(network):
-    """The most reliable way to find local devices."""
-    try:
-        # Send ARP broadcast to the whole subnet
-        ans, _ = scapy.srp(scapy.Ether(dst="ff:ff:ff:ff:ff:ff")/scapy.ARP(pdst=network), timeout=2, verbose=False)
-        return {rcv.psrc: rcv.hwsrc for _, rcv in ans}
-    except PermissionError:
-        print("[!] Error: Scapy requires Admin/Sudo privileges for ARP scanning.")
-        return {}
-    except: return {}
-
-def ping_fallback(ip):
-    """Used only if ARP fails or for non-local segments."""
+def icmp_ping(ip):
+    """Ping a single IP via ICMP. Returns IP if alive, else None."""
     param = "-n" if platform.system().lower() == "windows" else "-c"
     try:
-        result = subprocess.run(["ping", param, "1", "-w", "500", ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["ping", param, "1", "-w", "500", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         return ip if result.returncode == 0 else None
-    except: return None
+    except:
+        return None
+
+def icmp_sweep(network):
+    """Ping all hosts in the subnet concurrently. Returns set of live IPs."""
+    ips = [str(h) for h in ipaddress.IPv4Network(network, strict=False).hosts()]
+    live = set()
+    with ThreadPoolExecutor(max_workers=50) as ex:
+        futures = [ex.submit(icmp_ping, ip) for ip in ips]
+        for f in as_completed(futures):
+            res = f.result()
+            if res:
+                live.add(res)
+    return live
+
+def arp_collect(live_ips):
+    """Send ARP requests only to known-live IPs to collect their MAC addresses."""
+    mac_map = {}
+    try:
+        for ip in live_ips:
+            ans, _ = scapy.srp(
+                scapy.Ether(dst="ff:ff:ff:ff:ff:ff") / scapy.ARP(pdst=ip),
+                timeout=1, verbose=False
+            )
+            for _, rcv in ans:
+                mac_map[rcv.psrc] = rcv.hwsrc
+    except PermissionError:
+        print("[!] Error: Scapy requires Admin/Sudo privileges for ARP scanning.")
+    except:
+        pass
+    return mac_map
 
 # ── Enrichment Logic ──────────────────────────────────────────────────────────
 
@@ -107,19 +129,12 @@ def enrich_device(ip, mac=None):
 
 def perform_scan(network):
     print(f"[*] Scanning {network}...")
-    
-    # Discovery Phase
-    arp_results = arp_scan(network)
-    live_ips = set(arp_results.keys())
-    
-    # If ARP is empty (maybe permissions?), try a quick threaded ping
-    if not live_ips:
-        ips = [str(h) for h in ipaddress.IPv4Network(network, strict=False).hosts()]
-        with ThreadPoolExecutor(max_workers=50) as ex:
-            futures = [ex.submit(ping_fallback, ip) for ip in ips]
-            for f in as_completed(futures):
-                res = f.result()
-                if res: live_ips.add(res)
+
+    # Phase 1: ICMP sweep to find all live hosts
+    live_ips = icmp_sweep(network)
+
+    # Phase 2: ARP only on live IPs to collect MACs
+    arp_results = arp_collect(live_ips) if live_ips else {}
 
     # Enrichment Phase
     devices = []
